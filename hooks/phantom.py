@@ -77,7 +77,7 @@ def segments(cmd):
             tokens = shlex.split(part)
         except ValueError:
             continue
-        while tokens and (re.match(r"^[A-Za-z_]\w*=", tokens[0]) or tokens[0] in ("sudo", "time", "exec", "command")):
+        while tokens and (re.match(r"^[A-Za-z_]\w*=", tokens[0]) or tokens[0] in ("sudo", "time", "exec", "command", "env", "nohup")):
             tokens = tokens[1:]
         if tokens:
             yield tokens
@@ -195,7 +195,8 @@ def package_json_names(text):
         return set()
     out = set()
     for key in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
-        for name, ver in (data.get(key) or {}).items():
+        section = data.get(key) if isinstance(data, dict) else None
+        for name, ver in (section.items() if isinstance(section, dict) else ()):
             if isinstance(ver, str) and not re.match(r"(file|link|workspace|git|github|npm|https?):|[^@]*/", ver):
                 out.add(name.lower())
     return out
@@ -344,17 +345,32 @@ def assess(eco, name, private=False, now=None, lookup=lookup):
 # ---------------------------------------------------------------- hook
 
 
-def check_command(cmd, cwd, lookup=lookup):
+def plan(cmd, cwd, depth=0):
+    """-> [(ecosystem, name, private)], following `cd` and `sh -c` / `eval` wrappers."""
     jobs = []
     for tokens in segments(cmd):
+        tool = os.path.basename(tokens[0])
+        if tool == "cd":
+            cwd = os.path.normpath(os.path.join(cwd, os.path.expanduser(tokens[1] if len(tokens) > 1 else "~")))
+            continue
+        if tool in ("bash", "sh", "zsh", "eval") and depth < 3:
+            inner = tokens[tokens.index("-c") + 1] if "-c" in tokens[:-1] else " ".join(tokens[1:]) if tool == "eval" else None
+            jobs += plan(inner, cwd, depth + 1) if inner else []
+            continue
         for eco, names, manifest in find_installs(tokens):
-            private = private_registry(eco, tokens, cwd)
-            for name in names or added_in_manifest(cwd, manifest):
-                if (eco, name) not in [(e, n) for e, n, _ in jobs]:
-                    jobs.append((eco, name, private))
-    jobs = jobs[:20]
+            here = os.path.join(cwd, (flag_values(tokens, {"--prefix", "-C", "--cwd", "--dir"}) or ["."])[0])
+            private = private_registry(eco, tokens, here)
+            jobs += [(eco, name, private) for name in names or added_in_manifest(here, manifest)]
+    return jobs
+
+
+def check_command(cmd, cwd, lookup=lookup):
+    jobs = [j for j in dict.fromkeys(plan(cmd, cwd)) if norm(j[0], j[1]) not in POPULAR[j[0]]]
     if not jobs:
         return None
+    if len(jobs) > 20:  # don't silently check only some of them
+        return "ask", (f"phantom-deps: this installs {len(jobs)} packages outside its well-known list, "
+                       "too many to check one by one. Review them before allowing.")
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(lambda j: assess(j[0], j[1], j[2], lookup=lookup), jobs))
     denied = [r for v, r in results if v == "deny"]
@@ -455,8 +471,20 @@ def test():
             fh.write("requests==2.31\nreqeusts>=1  # typo\n-r other.txt\n")
         assert added_in_manifest(d, "package.json") == ["ghost-ui"]
         assert added_in_manifest(d, "requirements.txt") == ["reqeusts"]
-        out = handle({"tool_name": "Bash", "tool_input": {"command": "npm install"}, "cwd": d}, lookup=fake)
-        assert out["hookSpecificOutput"]["permissionDecision"] == "deny" and "ghost-ui" in out["hookSpecificOutput"]["permissionDecisionReason"]
+        decide = lambda c, cwd=d: (handle({"tool_name": "Bash", "tool_input": {"command": c}, "cwd": cwd}, lookup=fake)  # noqa: E731
+                                   or {}).get("hookSpecificOutput", {}).get("permissionDecision")
+        assert decide("npm install") == "deny"
+        # follows cd, --prefix and shell wrappers to the right manifest
+        parent = os.path.dirname(d)
+        assert decide(f"cd {os.path.basename(d)} && npm install", parent) == "deny"
+        assert decide(f"npm --prefix {os.path.basename(d)} install", parent) == "deny"
+        assert decide("bash -c 'pip install reqeusts'", "/") == "deny"
+        assert decide("env CI=1 sh -c \"cd /tmp; npm i ghost-x\"", "/") == "deny"
+        # too many unknown packages: ask instead of silently checking a subset
+        assert decide("npm i " + " ".join(f"pkg-{i}" for i in range(25)), "/") == "ask"
+        # malformed manifests don't crash the hook
+        assert package_json_names('["not", "an", "object"]') == set()
+        assert package_json_names('{"dependencies": ["x"]}') == set()
     print("ok")
 
 
@@ -479,9 +507,13 @@ if __name__ == "__main__":
     elif sys.argv[1:2] == ["check"] and len(sys.argv) == 4:
         print(assess(sys.argv[2], sys.argv[3]))
     else:
+        raw = sys.stdin.read()
         try:
-            result = handle(json.load(sys.stdin))
-            if result:
-                print(json.dumps(result))
-        except Exception as e:  # a broken hook must never break the session
-            print(f"phantom-deps: {e}", file=sys.stderr)
+            result = handle(json.loads(raw))
+        except Exception as e:  # a bug here must not wave installs through silently, or block everything else
+            looks_like_install = re.search(r"\b(install|add|dlx|exec|npx|bunx|uvx)\b", raw)
+            result = looks_like_install and {"hookSpecificOutput": {
+                "hookEventName": "PreToolUse", "permissionDecision": "ask",
+                "permissionDecisionReason": f"phantom-deps couldn't check this command ({e}). Review it before allowing."}}
+        if result:
+            print(json.dumps(result))
