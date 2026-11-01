@@ -72,15 +72,24 @@ POPULAR = {eco: {norm(eco, n) for n in names.split()} for eco, names in POPULAR.
 
 
 def segments(cmd):
-    for part in re.split(r"&&|\|\||;|\||\n", cmd.replace("\\\n", " ")):
-        try:
-            tokens = shlex.split(part)
-        except ValueError:
-            continue
-        while tokens and (re.match(r"^[A-Za-z_]\w*=", tokens[0]) or tokens[0] in ("sudo", "time", "exec", "command", "env", "nohup")):
-            tokens = tokens[1:]
-        if tokens:
-            yield tokens
+    """Split a shell command into simple commands at ; && || | and newlines, respecting quotes."""
+    lex = shlex.shlex(cmd.replace("\\\n", " "), posix=True, punctuation_chars=";&|\n")
+    lex.whitespace = " \t\r"
+    lex.whitespace_split = True
+    try:
+        words = list(lex)
+    except ValueError:  # unbalanced quotes: best effort
+        words = cmd.split()
+    tokens = []
+    for word in words + [";"]:
+        if word and set(word) <= set(";&|\n"):
+            while tokens and (re.match(r"^[A-Za-z_]\w*=", tokens[0]) or tokens[0] in ("sudo", "time", "exec", "command", "env", "nohup")):
+                tokens = tokens[1:]
+            if tokens:
+                yield tokens
+            tokens = []
+        else:
+            tokens.append(word)
 
 
 def positional(tokens, value_flags):
@@ -137,6 +146,11 @@ def find_installs(tokens):
         npm_flags = {"--filter", "-F", "--registry", "--prefix", "--workspace", "--tag", "--cwd", "-C"}
         if tool == "npm":
             npm_flags.add("-w")
+        i = 0  # skip global flags before the subcommand: npm --prefix web install
+        while i < len(rest) and rest[i].startswith("-"):
+            i += 2 if rest[i] in npm_flags else 1
+        rest = rest[i:]
+        sub = rest[0] if rest else ""
         if sub in ("install", "i", "add", "isntall"):
             args = positional(rest[1:], npm_flags)
             names = [n for n in map(npm_name, args) if n]
