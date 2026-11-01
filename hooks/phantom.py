@@ -76,10 +76,8 @@ def segments(cmd):
     lex = shlex.shlex(cmd.replace("\\\n", " "), posix=True, punctuation_chars=";&|\n")
     lex.whitespace = " \t\r"
     lex.whitespace_split = True
-    try:
-        words = list(lex)
-    except ValueError:  # unbalanced quotes: best effort
-        words = cmd.split()
+    lex.commenters = ""  # treating '#' as a comment could hide what follows; extra words are harmless
+    words = list(lex)  # unbalanced quotes raise ValueError; the caller then asks instead of guessing
     tokens = []
     for word in words + [";"]:
         if word and set(word) <= set(";&|\n"):
@@ -367,9 +365,16 @@ def plan(cmd, cwd, depth=0):
         if tool == "cd":
             cwd = os.path.normpath(os.path.join(cwd, os.path.expanduser(tokens[1] if len(tokens) > 1 else "~")))
             continue
-        if tool in ("bash", "sh", "zsh", "eval") and depth < 3:
-            inner = tokens[tokens.index("-c") + 1] if "-c" in tokens[:-1] else " ".join(tokens[1:]) if tool == "eval" else None
-            jobs += plan(inner, cwd, depth + 1) if inner else []
+        if tool in ("bash", "sh", "zsh", "dash", "eval"):
+            if tool == "eval":
+                inner = " ".join(tokens[1:])
+            else:  # -c, -lc, -ec, -xc ...: the command string is the next non-flag argument
+                flag = next((i for i, t in enumerate(tokens) if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", t)), None)
+                inner = next((t for t in tokens[flag + 1:] if not t.startswith("-")), None) if flag is not None else None
+            if inner:
+                if depth >= 3:
+                    raise ValueError("shell wrappers nested too deeply to check")
+                jobs += plan(inner, cwd, depth + 1)
             continue
         for eco, names, manifest in find_installs(tokens):
             here = os.path.join(cwd, (flag_values(tokens, {"--prefix", "-C", "--cwd", "--dir"}) or ["."])[0])
@@ -493,6 +498,16 @@ def test():
         assert decide(f"cd {os.path.basename(d)} && npm install", parent) == "deny"
         assert decide(f"npm --prefix {os.path.basename(d)} install", parent) == "deny"
         assert decide("bash -c 'pip install reqeusts'", "/") == "deny"
+        assert decide("bash -lc 'pip install reqeusts'", "/") == "deny"
+        assert decide("sh -e -c 'echo hi # no; pip install reqeusts'", "/") == "deny"
+        try:  # wrappers nested past the limit are refused, not skipped
+            plan("bash -c 'npm i ghost-x'", "/", depth=3)
+            raise AssertionError("expected ValueError")
+        except ValueError:
+            pass
+        r = subprocess.run([sys.executable, os.path.abspath(__file__)], capture_output=True, text=True,  # unparseable
+                           input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "pip install 'reqeusts"}, "cwd": "/"}))
+        assert '"ask"' in r.stdout, (r.stdout, r.stderr)
         assert decide("env CI=1 sh -c \"cd /tmp; npm i ghost-x\"", "/") == "deny"
         # too many unknown packages: ask instead of silently checking a subset
         assert decide("npm i " + " ".join(f"pkg-{i}" for i in range(25)), "/") == "ask"
