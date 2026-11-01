@@ -365,7 +365,7 @@ def plan(cmd, cwd, depth=0):
         if tool == "cd":
             cwd = os.path.normpath(os.path.join(cwd, os.path.expanduser(tokens[1] if len(tokens) > 1 else "~")))
             continue
-        if tool in ("bash", "sh", "zsh", "dash", "eval"):
+        if tool in ("bash", "sh", "zsh", "dash", "ksh", "fish", "eval"):
             if tool == "eval":
                 inner = " ".join(tokens[1:])
             else:  # -c, -lc, -ec, -xc ...: the command string is the next non-flag argument
@@ -539,9 +539,10 @@ if __name__ == "__main__":
         raw = sys.stdin.read()
         try:
             result = handle(json.loads(raw))
-        except Exception as e:  # a bug here must not wave installs through silently, or block everything else
-            looks_like_install = re.search(r"\b(install|add|dlx|exec|npx|bunx|uvx)\b", raw)
-            result = looks_like_install and {"hookSpecificOutput": {
+        except Exception as e:  # never wave an install through silently; don't block unrelated commands on a bug
+            unparseable = isinstance(e, ValueError)
+            looks_like_install = re.search(r"\b(install|isntall|i|add|dlx|exec|x|npx|bunx|uvx)\b", raw)
+            result = (unparseable or looks_like_install) and {"hookSpecificOutput": {
                 "hookEventName": "PreToolUse", "permissionDecision": "ask",
                 "permissionDecisionReason": f"phantom-deps couldn't check this command ({e}). Review it before allowing."}}
         if result:
