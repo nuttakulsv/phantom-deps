@@ -1,0 +1,7 @@
+{
+  "name": "phantom-deps",
+  "owner": { "name": "nuttakulsv" },
+  "plugins": [
+    { "name": "phantom-deps", "source": "./", "description": "Stops coding agents from installing hallucinated or look-alike packages (slopsquatting) on npm, PyPI, crates.io and RubyGems." }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "description": "Check packages against their registry before the agent installs them",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/phantom.py\"", "timeout": 30 }
+        ]
+      }
+    ]
+  }
+}

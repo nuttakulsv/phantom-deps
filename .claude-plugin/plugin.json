@@ -1,0 +1,9 @@
+{
+  "name": "phantom-deps",
+  "version": "0.1.0",
+  "description": "Stops coding agents from installing hallucinated or look-alike packages (slopsquatting) on npm, PyPI, crates.io and RubyGems.",
+  "author": { "name": "nuttakulsv" },
+  "homepage": "https://github.com/nuttakulsv/phantom-deps",
+  "license": "MIT",
+  "keywords": ["security", "supply-chain", "slopsquatting", "npm", "pypi", "hallucination"]
+}
